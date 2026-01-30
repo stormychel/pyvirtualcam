@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Type
+from typing import Optional, Dict, Type, TYPE_CHECKING, Callable
 from abc import ABC, abstractmethod
 import platform
 import time
@@ -105,20 +105,24 @@ def register_backend(name: str, clazz):
     BACKENDS[name] = clazz
 
 if platform.system() == 'Windows':
-    from pyvirtualcam import _native_windows_obs, _native_windows_unity_capture
-    register_backend('obs', _native_windows_obs.Camera)
-    register_backend('unitycapture', _native_windows_unity_capture.Camera)
+    if not TYPE_CHECKING:
+        from pyvirtualcam import _native_windows_obs, _native_windows_unity_capture
+        register_backend('obs', _native_windows_obs.Camera)
+        register_backend('unitycapture', _native_windows_unity_capture.Camera)
 elif platform.system() == 'Darwin':
     # Darwin 22 is used on macOS 13
     if int(platform.release().split(".")[0]) >= 22:
-        from pyvirtualcam import _native_macos_obs_cmioextension
-        register_backend('obs', _native_macos_obs_cmioextension.Camera)
+        if not TYPE_CHECKING:
+            from pyvirtualcam import _native_macos_obs_cmioextension
+            register_backend('obs', _native_macos_obs_cmioextension.Camera)
     else:
-        from pyvirtualcam import _native_macos_obs_dal
-        register_backend('obs', _native_macos_obs_dal.Camera)
+        if not TYPE_CHECKING:
+            from pyvirtualcam import _native_macos_obs_dal
+            register_backend('obs', _native_macos_obs_dal.Camera)
 elif platform.system() == 'Linux':
-    from pyvirtualcam import _native_linux_v4l2loopback
-    register_backend('v4l2loopback', _native_linux_v4l2loopback.Camera)
+    if not TYPE_CHECKING:
+        from pyvirtualcam import _native_linux_v4l2loopback
+        register_backend('v4l2loopback', _native_linux_v4l2loopback.Camera)
 
 class PixelFormat(Enum):
     """ Pixel formats.
@@ -206,11 +210,11 @@ class Camera:
             backends = [(backend, BACKENDS[backend])]
         else:
             backends = list(BACKENDS.items())
-        self._backend = None
+        backend_instance: Optional[Backend] = None
         errors = []
         for name, clazz in backends:
             try:
-                self._backend = clazz(
+                backend_instance = clazz(
                     width=width, height=height, fps=fps,
                     fourcc=encode_fourcc(fmt.value),
                     device=device,
@@ -218,16 +222,17 @@ class Camera:
             except Exception as e:
                 errors.append(f"'{name}' backend: {e}")
             else:
-                self._backend_name = name
+                self._backend_name: str = name
                 break
-        if self._backend is None:
+        if backend_instance is None:
             raise RuntimeError('\n'.join(errors))
-
-        self._width = width
-        self._height = height
-        self._fps = fps
-        self._fmt = fmt
-        self._print_fps = print_fps
+        
+        self._backend: Backend = backend_instance
+        self._width: int = width
+        self._height: int = height
+        self._fps: float = fps
+        self._fmt: PixelFormat = fmt
+        self._print_fps: bool = print_fps
 
         frame_shape = FrameShapes[fmt](width, height)
         if isinstance(frame_shape, int):
@@ -239,20 +244,20 @@ class Camera:
                 if frame.shape != frame_shape:
                     raise ValueError(f"unexpected frame shape: {frame.shape} != {frame_shape}")
 
-        self._check_frame_shape = check_frame_shape
+        self._check_frame_shape: Callable[[np.ndarray], None] = check_frame_shape
 
-        self._fps_counter = FPSCounter(fps)
-        self._fps_last_printed = time.perf_counter()
-        self._frames_sent = 0
-        self._last_frame_t = None
-        self._extra_time_per_frame = 0
+        self._fps_counter: FPSCounter = FPSCounter(fps)
+        self._fps_last_printed: float = time.perf_counter()
+        self._frames_sent: int = 0
+        self._last_frame_t: float = time.perf_counter()
+        self._extra_time_per_frame: float = 0.0
+        self._closed: bool = False
 
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
-        return False
     
     def __del__(self):
         self.close()
@@ -319,9 +324,9 @@ class Camera:
         This method is automatically called when using ``with`` or
         when this instance goes out of scope.
         """
-        if self._backend is not None:
+        if not self._closed:
             self._backend.close()
-            self._backend = None
+            self._closed = True
 
     def send(self, frame: np.ndarray) -> None:
         """Send a frame to the virtual camera device.
